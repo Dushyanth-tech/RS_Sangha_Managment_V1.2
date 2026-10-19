@@ -288,17 +288,34 @@ class EmploymentProfileUpdate(BaseModel):
 class CreditScoreFactor(BaseModel):
     key: str
     label: str
-    weight: int          # percent of the total score
-    score: float         # 0-100
+    weight: int                                   # percent of the total score
+    status: Literal["calculated", "insufficient"]
+    score: float | None                           # 0-100, None when insufficient
+    reliable: bool                                # enough evidence to count towards a reliable score
+    detail: str
+
+
+class CreditScoreLoan(BaseModel):
+    request_id: int
+    amount: float
+    status: str
+    disbursed_at: datetime | None
+    outstanding_principal: float
+    interest_cycles_due: int
+    interest_cycles_overdue: int
+    next_interest_due: datetime | None
 
 
 class CreditScoreResponse(BaseModel):
-    """RS-Sangha INTERNAL score. Not an official CIBIL score."""
+    """RS-Sangha INTERNAL score. Not an official CIBIL / TransUnion score."""
     score: int | None
     min_score: int
     max_score: int
-    category: str | None
-    status: Literal["sufficient", "insufficient_data"]
+    category: str | None                          # only when status == "sufficient"
+    status: Literal["sufficient", "provisional", "insufficient_data"]
+    coverage_percent: int
+    first_activity_date: date | None
     missing: list[str] = []
     calculated_at: datetime
     factors: list[CreditScoreFactor] = []
+    loans: list[CreditScoreLoan] = []

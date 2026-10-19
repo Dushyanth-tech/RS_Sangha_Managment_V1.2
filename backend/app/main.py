@@ -2433,7 +2433,7 @@ def get_my_credit_score(
     if user.role != "member":
         raise HTTPException(status_code=403, detail="Only members have an RS-Sangha score.")
     try:
-        return calculate_internal_score(db, user)
+        return calculate_internal_score(db, user, INTEREST_RATE_PERCENT)
     except SQLAlchemyError as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail="Unable to calculate your RS-Sangha score right now.") from exc

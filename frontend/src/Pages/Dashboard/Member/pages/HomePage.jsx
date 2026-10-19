@@ -12,6 +12,7 @@ import {
 
 import api from "../../../../api/axiosInstance";
 import MembersModal from "../Modal/MembersModal";
+import ScoreBreakdownModal from "../Modal/ScoreBreakdownModal";
 import MemberBankBalanceHistory from "./MemberBankBalanceHistory";
 import "./HomePage.css";
 
@@ -39,6 +40,7 @@ export default function HomePage({ user = {}, onNavigate }) {
 
   // RS-Sangha internal score: { state: "loading" | "ready" | "error", data }
   const [score, setScore] = useState({ state: "loading", data: null });
+  const [showBreakdown, setShowBreakdown] = useState(false);
 
   const loadScore = useCallback(async () => {
     setScore({ state: "loading", data: null });
@@ -101,6 +103,21 @@ export default function HomePage({ user = {}, onNavigate }) {
 
   const savings = summary?.savings ?? null;
   const debt = Number(summary?.outstandingDebt ?? 0);
+
+  // RS-Sangha score values used by the card (all come from the backend)
+  const scoreData = score.state === "ready" ? score.data : null;
+  const hasScore = scoreData?.score != null;
+  const scorePercent = hasScore
+    ? Math.max(
+        0,
+        Math.min(
+          100,
+          ((scoreData.score - scoreData.min_score) /
+            (scoreData.max_score - scoreData.min_score)) *
+            100
+        )
+      )
+    : 0;
 
   const previewMembers = members.slice(0, HOME_MEMBER_PREVIEW);
 
@@ -176,41 +193,45 @@ export default function HomePage({ user = {}, onNavigate }) {
                 Retry
               </button>
             </>
-          ) : score.data?.status === "sufficient" && score.data.score != null ? (
+          ) : hasScore ? (
             <>
               <div className="hp-card__value">
-                {score.data.score} / {score.data.max_score}
+                {scoreData.score} / {scoreData.max_score}
               </div>
-              <div className="hp-card__sub">{score.data.category}</div>
+              <div className="hp-card__sub">
+                {scoreData.status === "sufficient" ? scoreData.category : "Provisional score"}
+              </div>
               <div
                 className="hp-score__bar"
                 role="progressbar"
                 aria-label="RS-Sangha score"
-                aria-valuemin={score.data.min_score}
-                aria-valuemax={score.data.max_score}
-                aria-valuenow={score.data.score}
+                aria-valuemin={scoreData.min_score}
+                aria-valuemax={scoreData.max_score}
+                aria-valuenow={scoreData.score}
               >
-                <span
-                  style={{
-                    width: `${Math.max(
-                      0,
-                      Math.min(
-                        100,
-                        ((score.data.score - score.data.min_score) /
-                          (score.data.max_score - score.data.min_score)) *
-                          100
-                      )
-                    )}%`,
-                  }}
-                />
+                <span style={{ width: `${scorePercent}%` }} />
               </div>
+              <button
+                type="button"
+                className="hp-score__retry"
+                onClick={() => setShowBreakdown(true)}
+              >
+                View breakdown
+              </button>
             </>
           ) : (
             <>
               <div className="hp-card__value hp-card__value--muted">Insufficient Data</div>
-              {score.data?.missing?.[0] && (
-                <div className="hp-card__sub">{score.data.missing[0]}</div>
+              {scoreData?.missing?.[0] && (
+                <div className="hp-card__sub">{scoreData.missing[0]}</div>
               )}
+              <button
+                type="button"
+                className="hp-score__retry"
+                onClick={() => setShowBreakdown(true)}
+              >
+                View breakdown
+              </button>
             </>
           )}
         </article>
@@ -347,6 +368,10 @@ export default function HomePage({ user = {}, onNavigate }) {
           </>
         )}
       </section>
+
+      {showBreakdown && scoreData && (
+        <ScoreBreakdownModal data={scoreData} onClose={() => setShowBreakdown(false)} />
+      )}
 
       {showMembers && (
         <MembersModal
