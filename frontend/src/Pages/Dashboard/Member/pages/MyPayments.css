@@ -108,6 +108,8 @@
   gap: 10px;
 }
 
+.mp-stat--wide { grid-column: 1 / -1; }
+
 .mp-stat {
   display: flex;
   flex-direction: column;
@@ -965,7 +967,8 @@ button.mp-cal__day:focus-visible {
 
 /* ============ 1024px+ ============ */
 @media (min-width: 1024px) {
-  .mp-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .mp-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .mp-stat--wide { grid-column: auto; }
   .mp-stat__value { font-size: 24px; }
   .mp-header h1 { font-size: 30px; }
 
@@ -974,5 +977,107 @@ button.mp-cal__day:focus-visible {
     grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
     align-items: start;
     gap: 18px;
+  }
+}
+
+
+/* Mobile profile menu button */
+.md-mobile-menu-icon {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  color: var(--pink-700);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* Keep dropdown visible above dashboard content */
+.md-profile {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.md-profile__menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 240px;
+  max-width: calc(100vw - 24px);
+  z-index: 1200;
+}
+
+/* Mobile layout */
+@media (max-width: 700px) {
+  .md-topbar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .md-brand {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .md-profile {
+    margin-left: auto;
+  }
+
+  .md-profile__trigger {
+    gap: 7px;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .md-profile__name {
+    display: none;
+  }
+
+  .md-desktop-caret {
+    display: none;
+  }
+
+  .md-mobile-menu-icon {
+    display: flex;
+  }
+
+  .md-profile__menu {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    width: 250px;
+  }
+
+  .md-navigation {
+    order: 3;
+    flex-basis: 100%;
+    width: 100%;
+    margin: 0;
+    padding-bottom: 2px;
+    overflow-x: auto;
+  }
+
+  .md-navigation__item {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 360px) {
+  .md-brand__title {
+    font-size: 0.85rem;
+  }
+
+  .md-brand__mark {
+    width: 32px;
+    height: 32px;
+  }
+
+  .md-mobile-menu-icon {
+    font-size: 0.74rem;
+  }
+
+  .md-profile__menu {
+    width: 230px;
   }
 }

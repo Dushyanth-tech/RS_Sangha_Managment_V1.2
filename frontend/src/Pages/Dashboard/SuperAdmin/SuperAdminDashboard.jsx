@@ -39,6 +39,7 @@ const PAGES = {
 const SuperAdminDashboard = () => {
   const [activePage, setActivePage] = useState("overview");
   const [collapsed, setCollapsed] = useState(false);
+  
 
   const handleLogout = () => {
     localStorage.removeItem("access_token");

@@ -3,20 +3,35 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 # from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from app.credit_score import calculate_internal_score
+from app.authSchema import CreditScoreResponse
 from app.authSchema import NewUser, LoginUser, NewSanghas, Search, AdminRequestCreate,AddAdminRequest,RemoveSanghasPayload,SanghaUpdate, ProfileWizardUpdate, NotificationCreate, ClearNotificationsRequest, SanghaSavingsAccountCreate, CibilUpdate, FundRequestCreate, FundRequestReview, FundRepaymentCreate, FundPaymentCreate, FundPaymentConfirm, FundPaymentReject, ContributionCreate
+from app.authSchema import (
+    MemberBankBalanceSnapshotCreateResponse,
+    MemberBankBalanceSnapshotResponse,
+    MemberAvailableBalanceSnapshotCreateResponse,
+    MemberAvailableBalanceSnapshotResponse,
+    EmploymentProfileUpdate,
+)
+from app.bank_balance import (
+    BankBalanceSourceUnavailable,
+    fetch_verified_member_balance,
+)
 from decimal import Decimal
 from app.authModal import (
     User, Sanghas, SubAdminRequest, RequestStatus, BankDetails, Notification,
     NotificationRecipient, SanghaSavingsAccount, Loan, LoanRepayment,
     LoanStatus, VerificationRequest,    FundRequest, FundRepayment, FundTransaction, FundRequestStatus,
-    NotificationType, RecipientRule, NotificationStatus, FundPayment, Contribution
+    NotificationType, RecipientRule, NotificationStatus, FundPayment, Contribution,
+    MemberBankBalanceSnapshot, MemberAvailableBalanceSnapshot,
 )
 from app.dbconnection import get_db, engine, Base
 from app.auth import create_access_token, hash_password, verify_password, get_current_user
 from sqlalchemy import or_,func, select
 from sqlalchemy.orm import aliased, Session, joinedload
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from datetime import datetime, timezone, date, timedelta
+from fastapi import Query
 import re
 import json
 import os, uuid
@@ -41,6 +56,43 @@ MAX_MEMBERS_PER_SANGHA = 20
 
 UPLOAD_DIR = "uploads/profile_photos"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024   # 5 MB per image
+
+
+def _require_sangha_manager(db: Session, current_user_id, sangha_id: int) -> User:
+    """Superadmin may manage any sangha; an admin only the sanghas where admin_id == self."""
+    user = db.query(User).filter(User.id == int(current_user_id)).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found.")
+    if user.role == "superadmin":
+        return user
+    if user.role == "admin":
+        owns = db.query(Sanghas.id).filter(
+            Sanghas.id == sangha_id, Sanghas.admin_id == user.id
+        ).first()
+        if owns:
+            return user
+        raise HTTPException(status_code=403, detail="You do not manage this Sangha.")
+    raise HTTPException(status_code=403, detail="Only admin and superadmin can do this.")
+
+
+def _looks_like_image(raw: bytes) -> bool:
+    """Check the real file bytes (JPEG / PNG / WEBP), not the client-supplied content type."""
+    return (
+        raw[:3] == b"\xff\xd8\xff"
+        or raw[:8] == b"\x89PNG\r\n\x1a\n"
+        or (raw[:4] == b"RIFF" and raw[8:12] == b"WEBP")
+    )
+
+
+async def _read_image_limited(upload: UploadFile) -> bytes:
+    raw = await upload.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image is too large (max 5 MB).")
+    if not _looks_like_image(raw):
+        raise HTTPException(status_code=400, detail="File is not a valid JPEG, PNG, or WEBP image.")
+    return raw
 
 @app.get("/overview")
 def get_overview_stats(
@@ -110,6 +162,10 @@ def register_user(user: NewUser, db = Depends(get_db)):
     existing_user = db.query(User).filter(User.email == user.email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
+    if db.query(User.id).filter(User.username == user.username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
+    if db.query(User.id).filter(User.phone == user.phone).first():
+        raise HTTPException(status_code=400, detail="Phone number already registered")
 
     # Create a new user instance
     new_user = User(
@@ -122,7 +178,11 @@ def register_user(user: NewUser, db = Depends(get_db)):
 
     # Add the new user to the database
     db.add(new_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:           # FIX: race between check and insert
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Email, username or phone already registered")
     db.refresh(new_user)
 
     return {"message": "User registered successfully", "user_id": new_user.id}
@@ -351,6 +411,7 @@ def add_member(
     db=Depends(get_db),
     current_user_id=Depends(get_current_user),
 ):
+    _require_sangha_manager(db, current_user_id, sangha_id)   # FIX: permission check
     member_id = payload.get("member_id")
 
     # Lock the sangha row so two simultaneous adds can't both slip past the limit
@@ -589,6 +650,7 @@ def remove_member(
     db=Depends(get_db),
     current_user_id=Depends(get_current_user),
 ):
+    _require_sangha_manager(db, current_user_id, sangha_id)   # FIX: permission check
     sangha = db.query(Sanghas).filter(Sanghas.id == sangha_id).first()
     if not sangha:
         raise HTTPException(404, "Sangha not found")
@@ -894,7 +956,7 @@ def create_admin_request(
     subadmin_email=member.email,
     subadmin_phone=member.phone or "",
     address=member.address or "",
-    aadhar_number=decrypt_value(member.id_proof_number_enc) if member.id_proof_number_enc else "",
+    aadhar_number=mask_last4(decrypt_value(member.id_proof_number_enc)) if member.id_proof_number_enc else "",   # FIX: masked, never plaintext
     message=data.message.strip(),
     experience=None,
     qualifications=None,
@@ -1127,6 +1189,7 @@ def update_sangha(
     db: Session = Depends(get_db),
     current_user_id=Depends(get_current_user),
 ):
+    _require_sangha_manager(db, current_user_id, sangha_id)   # FIX: permission check
     sangha = db.query(Sanghas).filter(Sanghas.id == sangha_id).first()
     if not sangha:
         raise HTTPException(404, "Sangha not found")
@@ -1138,7 +1201,11 @@ def update_sangha(
         if value is not None and value.strip() != "":
             setattr(sangha, field, value.strip())
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:           # FIX: duplicate sangha name -> 409 instead of 500
+        db.rollback()
+        raise HTTPException(409, "A Sangha with this name already exists.")
     db.refresh(sangha)
 
     return {
@@ -1221,11 +1288,137 @@ async def upload_profile_photo(
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(400, "Only JPEG, PNG, or WEBP images are allowed.")
 
-    user.profile_photo_image = await file.read()
+    user.profile_photo_image = await _read_image_limited(file)   # FIX: size + real-bytes check
     user.profile_photo_content_type = file.content_type
     db.commit()
 
     return {"detail": "Profile photo uploaded."}
+
+
+
+@app.post(
+    "/me/bank-balance/snapshots",
+    response_model=MemberBankBalanceSnapshotCreateResponse,
+)
+def create_member_bank_balance_snapshot(
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    """Record / refresh today's snapshot of the member's bank balance (users.bank_balance)."""
+    user = _load_user(db, current_user_id)
+    role = getattr(user.role, "value", user.role)
+    if role != "member":
+        raise HTTPException(
+            status_code=403,
+            detail="Only members can record their balance history.",
+        )
+
+    user = _lock_user(db, user.id)
+    try:
+        _, _, snapshot, created = _sync_balance_snapshots(db, user)
+        db.commit()
+        db.refresh(snapshot)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Unable to save the balance snapshot.")
+    return {"snapshot": snapshot, "created": created}
+
+
+@app.get(
+    "/me/bank-balance/history",
+    response_model=list[MemberBankBalanceSnapshotResponse],
+)
+def get_member_bank_balance_history(
+    days: int = Query(default=30, ge=1, le=3650),
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    """Return only the authenticated member's application balance history."""
+    user = _load_user(db, current_user_id)
+
+    role = getattr(user.role, "value", user.role)
+    if role != "member":
+        raise HTTPException(
+            status_code=403,
+            detail="Only members can view their available-balance history.",
+        )
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    return (
+        db.query(MemberBankBalanceSnapshot)
+        .filter(
+            MemberBankBalanceSnapshot.member_id == user.id,
+            MemberBankBalanceSnapshot.recorded_at >= cutoff,
+            MemberBankBalanceSnapshot.source == "RS-Sangha application",
+        )
+        .order_by(
+            MemberBankBalanceSnapshot.recorded_at.asc(),
+            MemberBankBalanceSnapshot.id.asc(),
+        )
+        .all()
+    )
+
+
+
+@app.post(
+    "/me/available-balance/snapshots",
+    response_model=MemberAvailableBalanceSnapshotCreateResponse,
+)
+def create_member_available_balance_snapshot(
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    """Record / refresh today's snapshot of the member's bank balance (users.bank_balance).
+    Called when the dashboard opens; the same row is also updated on every credit or debit."""
+    user = _load_user(db, current_user_id)
+    if user.role != "member":
+        raise HTTPException(status_code=403, detail="Only members can record balance history.")
+
+    user = _lock_user(db, user.id)
+    try:
+        snapshot, created, _, _ = _sync_balance_snapshots(db, user)
+        db.commit()
+        db.refresh(snapshot)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Unable to save the balance snapshot.")
+    return {"snapshot": snapshot, "created": created}
+
+
+@app.get(
+    "/me/available-balance/history",
+    response_model=list[MemberAvailableBalanceSnapshotResponse],
+)
+def get_member_available_balance_history(
+    days: int = Query(default=30, ge=1, le=3650),
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    user = _load_user(db, current_user_id)
+    if user.role != "member":
+        raise HTTPException(status_code=403, detail="Only members can view available balance history.")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        return (
+            db.query(MemberAvailableBalanceSnapshot)
+            .filter(
+                MemberAvailableBalanceSnapshot.member_id == user.id,
+                MemberAvailableBalanceSnapshot.recorded_at >= cutoff,
+            )
+            .order_by(
+                MemberAvailableBalanceSnapshot.recorded_at.asc(),
+                MemberAvailableBalanceSnapshot.id.asc(),
+            )
+            .all()
+        )
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to load available balance history.",
+        ) from exc
 
 
 @app.get("/me/profile-wizard")
@@ -1291,7 +1484,10 @@ async def complete_profile(
     if date_of_birth:
         user.date_of_birth = date_of_birth
     if phone:
-        user.phone = phone.strip()
+        phone = phone.strip()
+        if db.query(User.id).filter(User.phone == phone, User.id != user.id).first():
+            raise HTTPException(422, detail="This phone number is already registered to another account.")
+        user.phone = phone
     if address:
         user.address = address.strip()
 
@@ -1312,7 +1508,7 @@ async def complete_profile(
     if id_proof_image is not None:
         if id_proof_image.content_type not in ALLOWED_IMAGE_TYPES:
             raise HTTPException(422, detail="ID proof image must be JPEG, PNG, or WEBP.")
-        raw = await id_proof_image.read()
+        raw = await _read_image_limited(id_proof_image)
         user.id_proof_image_enc = encrypt_bytes(raw)
         user.id_proof_image_content_type = id_proof_image.content_type
 
@@ -1330,7 +1526,7 @@ async def complete_profile(
     if pan_image is not None:
         if pan_image.content_type not in ALLOWED_IMAGE_TYPES:
             raise HTTPException(422, detail="PAN image must be JPEG, PNG, or WEBP.")
-        raw = await pan_image.read()
+        raw = await _read_image_limited(pan_image)
         user.pan_image_enc = encrypt_bytes(raw)
         user.pan_image_content_type = pan_image.content_type
 
@@ -1658,12 +1854,12 @@ def clear_selected_notifications(
         "deleted_count": deleted_count,
     }
 
-def _require_superadmin(db: Session, current_user_id):
+def _require_staff(db: Session, current_user_id):
     user = db.query(User).filter(User.id == int(current_user_id)).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found.")
     if user.role != "superadmin" and user.role!="admin":
-        raise HTTPException(status_code=403, detail="Only superadmin can access this.")
+        raise HTTPException(status_code=403, detail="Only admin and superadmin can access this.")
     return user
 
 
@@ -1751,7 +1947,7 @@ def verify_member(
     db: Session = Depends(get_db),
     current_user_id=Depends(get_current_user),
 ):
-    verifier = _require_superadmin(db, current_user_id)   # returns the logged-in user (admin or superadmin)
+    verifier = _require_staff(db, current_user_id)   # returns the logged-in user (admin or superadmin)
 
     member = db.query(User).filter(User.id == member_id, User.role == "member").first()
     if not member:
@@ -2224,6 +2420,25 @@ def get_member_home_summary(
         "interestRate": float(INTEREST_RATE_PERCENT),
     }
 
+@app.get("/me/credit-score", response_model=CreditScoreResponse)
+def get_my_credit_score(
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    """RS-Sangha INTERNAL score for the logged-in member only. The member is taken from the JWT;
+    the request carries no member id, so nobody can ask for someone else's score."""
+    user = db.query(User).filter(User.id == int(current_user_id)).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found.")
+    if user.role != "member":
+        raise HTTPException(status_code=403, detail="Only members have an RS-Sangha score.")
+    try:
+        return calculate_internal_score(db, user)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Unable to calculate your RS-Sangha score right now.") from exc
+
+
 @app.patch("/superadmin/members/{member_id}/cibil")
 def set_member_cibil(
     member_id: int,
@@ -2231,7 +2446,7 @@ def set_member_cibil(
     db: Session = Depends(get_db),
     current_user_id=Depends(get_current_user),
 ):
-    _require_superadmin(db, current_user_id)
+    _require_staff(db, current_user_id)
 
     member = db.query(User).filter(User.id == member_id, User.role == "member").first()
     if not member:
@@ -2258,6 +2473,134 @@ ZERO = Decimal(0)
 
 def _d(value) -> Decimal:
     return Decimal(str(value if value is not None else 0))
+
+
+def _member_available_balance(requests) -> Decimal:
+    try:
+        active = (request for request in requests if request.status in ACTIVE_STATUSES)
+        balance = sum((_d(request.amount_approved) for request in active), ZERO)
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError("Could not calculate the available balance.") from exc
+    if (
+        not balance.is_finite()
+        or balance.as_tuple().exponent < -2
+        or abs(balance) >= Decimal("10000000000000000")
+    ):
+        raise ValueError("Calculated available balance is outside the supported money range.")
+    return balance
+
+
+BALANCE_SNAPSHOT_SOURCE = "RS-Sangha application"
+
+
+def _lock_user(db: Session, member_id: int) -> User:
+    """Load the member's row and lock it until commit, so balance changes cannot overlap."""
+    user = (
+        db.query(User).filter(User.id == member_id)
+        .with_for_update().populate_existing().first()
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="Member not found.")
+    return user
+
+
+def _sync_balance_snapshots(db: Session, user: User):
+    """Write the member's CURRENT users.bank_balance into today's snapshot rows.
+    One row per member per day (IST) in both snapshot tables; the row is UPDATED every time the
+    balance changes, so the day always shows the latest balance. Caller commits."""
+    now = datetime.now(timezone.utc)
+    day = _today_ist()
+    balance = _d(user.bank_balance)
+
+    avail = (
+        db.query(MemberAvailableBalanceSnapshot)
+        .filter(
+            MemberAvailableBalanceSnapshot.member_id == user.id,
+            MemberAvailableBalanceSnapshot.snapshot_day == day,
+        )
+        .first()
+    )
+    avail_new = avail is None
+    if avail_new:
+        avail = MemberAvailableBalanceSnapshot(
+            member_id=user.id, balance=balance, recorded_at=now, snapshot_day=day,
+        )
+        db.add(avail)
+    else:
+        avail.balance = balance
+        avail.recorded_at = now
+
+    reference = f"application-available-balance:{day.isoformat()}"
+    bank = (
+        db.query(MemberBankBalanceSnapshot)
+        .filter(
+            MemberBankBalanceSnapshot.member_id == user.id,
+            MemberBankBalanceSnapshot.source == BALANCE_SNAPSHOT_SOURCE,
+            MemberBankBalanceSnapshot.source_reference == reference,
+        )
+        .first()
+    )
+    bank_new = bank is None
+    if bank_new:
+        bank = MemberBankBalanceSnapshot(
+            member_id=user.id, balance=balance, recorded_at=now,
+            source=BALANCE_SNAPSHOT_SOURCE, source_reference=reference,
+        )
+        db.add(bank)
+    else:
+        bank.balance = balance
+        bank.recorded_at = now
+
+    db.flush()
+    return avail, avail_new, bank, bank_new
+
+
+def _apply_balance_change(db: Session, member_id: int, delta: Decimal) -> User:
+    """Credit (+) or debit (-) users.bank_balance and refresh today's snapshot in the same
+    transaction. Refuses to take the balance below zero. Caller commits."""
+    user = _lock_user(db, member_id)
+    new_balance = _d(user.bank_balance) + _d(delta)
+    if new_balance < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Insufficient bank balance. The member has {_d(user.bank_balance):,.2f} "
+                f"but {abs(_d(delta)):,.2f} must be debited."
+            ),
+        )
+    user.bank_balance = new_balance
+    _sync_balance_snapshots(db, user)
+    return user
+
+
+def _spendable_balance(db: Session, user: User) -> Decimal:
+    """users.bank_balance minus money already promised in payments still waiting for admin confirmation."""
+    pending_contrib = (
+        db.query(func.coalesce(func.sum(Contribution.amount), 0))
+        .filter(Contribution.member_id == user.id, Contribution.status == "Pending")
+        .scalar()
+    )
+    pending_pay = (
+        db.query(func.coalesce(func.sum(FundPayment.amount), 0))
+        .filter(FundPayment.member_id == user.id, FundPayment.status == "Pending")
+        .scalar()
+    )
+    return _d(user.bank_balance) - _d(pending_contrib) - _d(pending_pay)
+
+
+def _require_balance(db: Session, user: User, amount: Decimal, what: str) -> None:
+    """Block any payment larger than the member's bank balance. Locks the user row so two
+    simultaneous requests cannot both spend the same balance."""
+    db.query(User).filter(User.id == user.id).with_for_update().populate_existing().first()
+    spendable = _spendable_balance(db, user)
+    if spendable < _d(amount):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Insufficient bank balance. You can pay up to {max(spendable, ZERO):,.2f} right now, "
+                f"but this {what} is {_d(amount):,.2f}."
+            ),
+        )
 
 
 def _load_user(db: Session, current_user_id) -> User:
@@ -2541,8 +2884,9 @@ def get_savings_overview(
 
         result["member"] = {
             "verificationStatus": _verification_label(db, user),
+            "bankBalance": float(_d(user.bank_balance)),   # users.bank_balance
             # ASSUMPTION: money credited to the member from requests still being repaid.
-            "availableBalance": float(sum((_d(r.amount_approved) for r in active), ZERO)),
+            "availableBalance": float(_member_available_balance(reqs)),
             "outstanding": float(sum((_outstanding_of(r, rm) for r in active), ZERO)),
             "totalReceived": float(sum((_d(r.amount_approved) for r in reqs if r.status in received_statuses), ZERO)),
             "totalRepaid": float(sum((_d(p.principal) + _d(p.interest) for p in reps), ZERO)),
@@ -2970,6 +3314,7 @@ def review_fund_request(
 
         # Approve AND credit in one transaction
         _store_balance(account, balance - amount)
+        _apply_balance_change(db, req.member_id, amount)     # credit the member
         req.amount_approved = amount
         req.status = FundRequestStatus.disbursed
         req.disbursed_at = datetime.utcnow()
@@ -3035,6 +3380,7 @@ def disburse_fund_request(
         raise HTTPException(status_code=400, detail="Insufficient Sangha Savings balance.")
 
     _store_balance(account, balance - amount)
+    _apply_balance_change(db, req.member_id, amount)         # credit the member
     req.status = FundRequestStatus.disbursed
     req.disbursed_at = datetime.utcnow()
     db.add(FundTransaction(
@@ -3077,6 +3423,7 @@ def record_fund_repayment(
         raise HTTPException(status_code=400, detail="No Sangha Savings Account found.")
 
     _store_balance(account, _balance(account) + principal + interest)
+    _apply_balance_change(db, req.member_id, -(principal + interest))   # debit the member
 
     db.add(FundRepayment(
         request_id=req.id, sangha_id=req.sangha_id, member_id=req.member_id,
@@ -3195,7 +3542,7 @@ INTEREST_RATE_PERCENT = Decimal("10")   # per month, on the outstanding principa
 
 
 def _interest_due_for(db: Session, req: FundRequest, outstanding: Decimal) -> Decimal:
-    """2% of the outstanding principal, minus interest already paid this month on this request."""
+    """INTEREST_RATE_PERCENT of the outstanding principal, minus interest already paid this month."""
     monthly = (outstanding * INTEREST_RATE_PERCENT / 100).quantize(Decimal("0.01"))
     paid = (
         db.query(func.coalesce(func.sum(FundRepayment.interest), 0))
@@ -3329,8 +3676,17 @@ def create_fund_payment(
     if payload.amount > due:
         raise HTTPException(status_code=422, detail=f"The most you can pay now is ₹{due:,.2f}.")
 
+    # The payment (interest or principal) must be covered by the member's bank balance
+    _require_balance(db, user, payload.amount, f"{payload.kind} payment")
+
     req = target["req"]
     sangha = db.query(Sanghas).filter(Sanghas.id == req.sangha_id).first()
+
+    ref = payload.reference.strip()
+    if db.query(FundPayment.id).filter(
+        FundPayment.reference == ref, FundPayment.status.in_(("Pending", "Confirmed"))
+    ).first():
+        raise HTTPException(status_code=409, detail="This transaction reference was already submitted.")
 
     pay = FundPayment(
         request_id=req.id, sangha_id=req.sangha_id, member_id=user.id,
@@ -3399,6 +3755,7 @@ def confirm_fund_payment(
     principal = pay.amount if pay.kind == "principal" else ZERO
     interest = pay.amount if pay.kind == "interest" else ZERO
     result = _apply_repayment(db, user, req, _d(principal), _d(interest), payload.is_on_time)
+    _apply_balance_change(db, pay.member_id, -_d(pay.amount))           # debit the member
 
     pay.status = "Confirmed"
     pay.reviewed_by = user.id
@@ -3584,6 +3941,9 @@ def create_contribution(
     if taken:
         raise HTTPException(status_code=409, detail="Some of these days are already paid or waiting for confirmation.")
 
+    # The whole contribution (all selected days) must be covered by the bank balance
+    _require_balance(db, user, CONTRIBUTION_PER_DAY * len(dates), "contribution")
+
     now = datetime.utcnow()
     batch_id = str(uuid.uuid4())
     for d in dates:
@@ -3685,6 +4045,7 @@ def confirm_contribution(
         raise HTTPException(status_code=400, detail="No Sangha Savings Account found.")
 
     _store_balance(account, _balance(account) + total)   # contributions grow the Sangha fund
+    _apply_balance_change(db, rows[0].member_id, -total)  # debit the member
 
     now = datetime.utcnow()
     for r in rows:
@@ -3728,5 +4089,100 @@ def reject_contribution(
     return {"detail": "Contribution rejected."}
 
 
-Base.metadata.create_all(bind=engine)
+@app.get("/me/employment-profile")
+def get_employment_profile(
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    user = db.query(User).filter(
+        User.id == int(current_user_id)
+    ).first()
 
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found.")
+
+    if user.role != "member":
+        raise HTTPException(
+            status_code=403,
+            detail="Only members can access this profile.",
+        )
+
+    professional = (user.professional or "").strip()
+    is_house_wife = professional.casefold() == "house wife"
+
+    completed = bool(
+        is_house_wife
+        or (professional and user.salary is not None)
+    )
+
+    return {
+        "professional": user.professional,
+        "salary": user.salary,
+        "employment_type": (
+            "house_wife" if is_house_wife
+            else "other" if professional
+            else None
+        ),
+        "needs_completion": not completed,
+    }
+
+
+@app.patch("/me/employment-profile")
+def update_employment_profile(
+    payload: EmploymentProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user_id=Depends(get_current_user),
+):
+    user = db.query(User).filter(
+        User.id == int(current_user_id)
+    ).first()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found.")
+
+    if user.role != "member":
+        raise HTTPException(
+            status_code=403,
+            detail="Only members can update this profile.",
+        )
+
+    if payload.employment_type == "house_wife":
+        user.professional = "House wife"
+        user.salary = None
+
+    else:
+        professional = (payload.professional or "").strip()
+
+        if not professional:
+            raise HTTPException(
+                status_code=422,
+                detail="Please enter your profession.",
+            )
+
+        if len(professional) > 100:
+            raise HTTPException(
+                status_code=422,
+                detail="Profession must be 100 characters or fewer.",
+            )
+
+        if payload.salary is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Please enter your monthly salary.",
+            )
+
+        user.professional = professional
+        user.salary = payload.salary
+
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Employment details saved successfully.",
+        "professional": user.professional,
+        "salary": user.salary,
+        "completed": True,
+    }
+
+
+Base.metadata.create_all(bind=engine)

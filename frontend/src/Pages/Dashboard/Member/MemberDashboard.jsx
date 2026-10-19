@@ -13,6 +13,8 @@ import {
   ShieldCheck,
   LifeBuoy,
   LogOut,
+  X,
+  Menu,
 } from "lucide-react";
 
 import "./MemberDashboard.css";
@@ -26,6 +28,7 @@ import SettingsPage from "./pages/SettingsPage";
 import HelpSupport from "./pages/HelpSupport";
 import Notifications from "./pages/Notifications";
 import AccountStatusModal from "./Modal/AccountStatusModal";
+import EmploymentProfileModal from "./Modal/EmploymentProfileModal";
 
 // Settings moved into the profile dropdown
 const NAV_ITEMS = [
@@ -41,6 +44,10 @@ export default function MemberDashboard() {
   const [page, setPage] = useState("home");
   const [sanghasName, setSanghasName] = useState("");
   const [showAccountStatus, setShowAccountStatus] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [showEmploymentProfileModal, setShowEmploymentProfileModal] =
+    useState(false);
+
   const menuRef = useRef(null);
   const user = JSON.parse(localStorage.getItem("user") || "{}");
 
@@ -85,6 +92,29 @@ export default function MemberDashboard() {
   useEffect(() => {
     fetchNotifications();
     fetchSanghas();
+
+    let active = true;
+
+    const checkEmploymentProfile = async () => {
+      try {
+        const response = await api.get("/me/employment-profile");
+
+        if (active && response.data?.needs_completion) {
+          setShowEmploymentProfileModal(true);
+        }
+      } catch (error) {
+        console.error(
+          "Unable to check employment profile:",
+          error.response?.data?.detail || error.message,
+        );
+      }
+    };
+
+    checkEmploymentProfile();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleMarkRead = async (notification) => {
@@ -138,6 +168,7 @@ export default function MemberDashboard() {
   const handleNavigation = (selectedPage) => {
     setPage(selectedPage);
     setMenuOpen(false);
+    setMobileMenuOpen(false);
   };
 
   const openAccountStatus = () => {
@@ -212,13 +243,30 @@ export default function MemberDashboard() {
           <button
             type="button"
             className="md-profile__trigger"
-            onClick={() => setMenuOpen((value) => !value)}
+            aria-label={
+              mobileMenuOpen ? "Close profile menu" : "Open profile menu"
+            }
+            aria-expanded={menuOpen}
+            onClick={() => {
+              setMenuOpen((value) => !value);
+              setMobileMenuOpen((value) => !value);
+            }}
           >
             <span className="md-avatar">{initials}</span>
+
             <span className="md-profile__name">
               {user.fullname || "Member"}
             </span>
-            <ChevronDown size={16} className="md-profile__caret" />
+
+            <ChevronDown
+              size={16}
+              className="md-profile__caret md-desktop-caret"
+            />
+
+            <span className="md-mobile-menu-icon">
+              {menuOpen ? <X size={21} /> : <Menu size={21} />}
+              <span>Menu</span>
+            </span>
           </button>
 
           {menuOpen && (
@@ -289,6 +337,14 @@ export default function MemberDashboard() {
           onNavigate={(pageKey) => {
             setShowAccountStatus(false);
             handleNavigation(pageKey);
+          }}
+        />
+      )}
+      {showEmploymentProfileModal && (
+        <EmploymentProfileModal
+          onCompleted={() => {
+            setShowEmploymentProfileModal(false);
+            setPage("home");
           }}
         />
       )}

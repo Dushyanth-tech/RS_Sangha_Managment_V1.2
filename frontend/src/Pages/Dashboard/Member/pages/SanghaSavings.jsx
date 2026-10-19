@@ -20,6 +20,15 @@ import {
   RefreshCw,
   ArrowRight,
 } from "lucide-react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import api from "../../../../api/axiosInstance";
 import "./SanghaSavings.css";
@@ -263,14 +272,6 @@ function Snapshot({ isStaff, ov, loading }) {
       ) : (
         <>
           <Stat
-            icon={Wallet}
-            label="My Available Balance"
-            value={rupees(member?.availableBalance ?? 0)}
-            desc="Available to you"
-            tone="green"
-            loading={loading}
-          />
-          <Stat
             icon={HandCoins}
             label="My Outstanding"
             value={rupees(member?.outstanding ?? 0)}
@@ -485,14 +486,9 @@ function FinancialPosition({ member, loading }) {
     <Section
       id="ss-position"
       title="My Financial Position"
-      subtitle="What is available to you is shown separately from what you still owe"
+      subtitle="What you still owe"
     >
       <div className="ss-pos">
-        <div className="ss-pos__box ss-pos__box--green">
-          <span>Available Balance</span>
-          {loading ? <Skel w="60%" h={26} /> : <strong>{rupees(member?.availableBalance ?? 0)}</strong>}
-          <small>Money currently available to you</small>
-        </div>
         <div className="ss-pos__box ss-pos__box--red">
           <span>Outstanding Amount</span>
           {loading ? <Skel w="60%" h={26} /> : <strong>{rupees(member?.outstanding ?? 0)}</strong>}
@@ -508,6 +504,91 @@ function FinancialPosition({ member, loading }) {
           </div>
         ))}
       </dl>
+    </Section>
+  );
+}
+
+function AvailableBalanceHistory({ items, loading, error, snapshotError, onRetry }) {
+  const chartItems = items.map((item) => ({
+    ...item,
+    chartBalance: Number(item.balance),
+  }));
+
+  return (
+    <Section
+      id="ss-available-balance-history"
+      title="Bank Balance History"
+      subtitle="Your bank balance, updated whenever money is credited or debited"
+    >
+      {snapshotError && <ErrorBox text={snapshotError} onRetry={onRetry} />}
+      {loading ? (
+        <Skel h={100} />
+      ) : error ? (
+        <ErrorBox text={error} onRetry={onRetry} />
+      ) : items.length === 0 ? (
+        <Empty icon={Wallet} text="No bank balance has been recorded yet." />
+      ) : (
+        <>
+          {chartItems.length > 1 && (
+            <div className="ss-balance-chart">
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart
+                  data={chartItems}
+                  margin={{ top: 12, right: 16, bottom: 8, left: 8 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="recorded_at"
+                    tickFormatter={fmtDate}
+                  />
+                  <YAxis
+                    tickFormatter={(value) =>
+                      `₹${Number(value).toLocaleString("en-IN")}`
+                    }
+                    width={82}
+                  />
+                  <Tooltip
+                    labelFormatter={(value) =>
+                      new Date(value).toLocaleString("en-IN", {
+                        dateStyle: "medium",
+                        timeStyle: "short",
+                      })
+                    }
+                    formatter={(value) => [rupees(value), "Bank Balance"]}
+                  />
+                  <Line
+                    type="linear"
+                    dataKey="chartBalance"
+                    name="Available balance"
+                    stroke="#1a7a51"
+                    strokeWidth={2}
+                    dot={{ r: 4 }}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          <div className="ss-balance-history">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Recorded</th>
+                  <th scope="col">Bank Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.id}>
+                    <td>{fmtDate(item.recorded_at)}</td>
+                    <td>{rupees(item.balance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </Section>
   );
 }
@@ -784,65 +865,224 @@ function QuickActions({ actions }) {
    REQUEST MODAL (member)
 ==================================================================== */
 
+
 function RequestModal({ ov, onClose, onSubmitted }) {
   const member = ov.member;
   const fund = ov.fund;
 
-  const [step, setStep] = useState("form"); // form | confirm | done
-  const [form, setForm] = useState({ amount: "", salary: "", reason: "" });
+  const [step, setStep] = useState("form");
+  const [form, setForm] = useState({
+    amount: "",
+    reason: "",
+  });
+
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
+  const [snapshots, setSnapshots] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState("");
+
   const lock = useRef(false);
 
   const amount = Number(form.amount);
-  const salary = Number(form.salary);
 
-  const update = (e) => setForm((p) => ({ ...p, [e.target.name]: e.target.value }));
+  // Load the member's existing history. No snapshot is created here.
+  useEffect(() => {
+    let active = true;
+
+    async function loadHistory() {
+      setHistoryLoading(true);
+      setHistoryError("");
+
+      try {
+        const response = await api.get("/me/bank-balance/history", {
+          params: { days: 28 },
+        });
+
+        if (!Array.isArray(response.data)) {
+          throw new Error("Unexpected balance history response.");
+        }
+
+        if (active) {
+          setSnapshots(
+            response.data.filter((item) => {
+              const balance = Number(item.balance);
+              return (
+                Number.isFinite(balance) &&
+                balance >= 0 &&
+                item.recorded_at &&
+                !Number.isNaN(Date.parse(item.recorded_at))
+              );
+            })
+          );
+        }
+      } catch (err) {
+        if (active) {
+          setHistoryError(
+            err.response?.data?.detail ||
+              "Unable to load your available-balance history."
+          );
+        }
+      } finally {
+        if (active) setHistoryLoading(false);
+      }
+    }
+
+    loadHistory();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const assessment = useMemo(() => {
+    const sorted = [...snapshots].sort(
+      (a, b) =>
+        new Date(a.recorded_at).getTime() -
+        new Date(b.recorded_at).getTime()
+    );
+
+    const values = sorted.map((item) => Number(item.balance));
+
+    if (!values.length) {
+      return {
+        count: 0,
+        average: null,
+        minimum: null,
+        maximum: null,
+        trend: "Not enough history",
+        change: null,
+      };
+    }
+
+    const first = values[0];
+    const latest = values[values.length - 1];
+    const difference = latest - first;
+
+    let trend = "Not enough history";
+
+    if (values.length >= 2) {
+      const tolerance = 0.01;
+
+      if (difference > tolerance) trend = "Increasing";
+      else if (difference < -tolerance) trend = "Decreasing";
+      else trend = "Stable";
+    }
+
+    return {
+      count: values.length,
+      average:
+        values.reduce((sum, value) => sum + value, 0) / values.length,
+      minimum: Math.min(...values),
+      maximum: Math.max(...values),
+      trend,
+      change: values.length >= 2 ? difference : null,
+    };
+  }, [snapshots]);
+
+  const update = (event) => {
+    const { name, value } = event.target;
+
+    setForm((previous) => ({
+      ...previous,
+      [name]: value,
+    }));
+
+    setError("");
+  };
 
   const validate = () => {
-    if (!member.profile.fullname || !member.profile.phone || !member.profile.address) {
+    if (
+      !member?.profile?.fullname ||
+      !member?.profile?.phone ||
+      !member?.profile?.address
+    ) {
       return "Your name, phone number and address must be in your profile.";
     }
-    if (!(amount > 0)) return "Enter a requested amount greater than ₹0.";
-    if (amount > fund.balance) return "Requested amount exceeds the available Sangha fund.";
-    if (!(salary > 0)) return "Enter a valid monthly salary.";
-    if (form.reason.trim().length < 10) return "Please explain your reason (at least 10 characters).";
+
+    if (ov.eligibility && !ov.eligibility.canRequest) {
+      return (
+        ov.eligibility.reasons?.[0]?.message ||
+        "You are currently not eligible to request emergency money."
+      );
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return "Enter a requested amount greater than ₹0.";
+    }
+
+    if (amount > Number(fund?.balance ?? 0)) {
+      return "Requested amount exceeds the available Sangha fund.";
+    }
+
+    if (form.reason.trim().length < 10) {
+      return "Please explain your reason using at least 10 characters.";
+    }
+
     return "";
   };
 
   const goConfirm = () => {
     const problem = validate();
+
     if (problem) {
       setError(problem);
       return;
     }
+
     setError("");
     setStep("confirm");
   };
 
   const submit = async () => {
-    if (lock.current) return; // blocks accidental double submits
+    if (lock.current) return;
+
+    const problem = validate();
+
+    if (problem) {
+      setError(problem);
+      setStep("form");
+      return;
+    }
+
     lock.current = true;
     setSubmitting(true);
     setError("");
 
     try {
-      const res = await api.post("/sangha-savings/requests", {
+      // The backend rechecks member eligibility and the current
+      // Sangha fund balance before saving the request.
+      const response = await api.post("/sangha-savings/requests", {
         amount,
-        monthly_salary: salary,
         reason: form.reason.trim(),
       });
-      setResult(res.data.request);
+
+      setResult(response.data.request);
       setStep("done");
       onSubmitted();
     } catch (err) {
-      console.error("Error submitting request:", err);
-      setError(errorText(err, "Unable to submit the request."));
+      setError(
+        err.response?.data?.detail ||
+          err.message ||
+          "Unable to submit the request."
+      );
       lock.current = false;
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const formatTrend = () => {
+    if (assessment.change === null) {
+      return assessment.trend;
+    }
+
+    const sign = assessment.change > 0 ? "+" : "";
+
+    return `${assessment.trend} (${sign}${rupees(
+      assessment.change
+    )})`;
   };
 
   return (
@@ -855,15 +1095,17 @@ function RequestModal({ ov, onClose, onSubmitted }) {
         <div className="ss-form">
           <label>
             Name
-            <input value={member.profile.fullname || ""} readOnly />
+            <input value={member?.profile?.fullname || ""} readOnly />
           </label>
+
           <label>
             Phone Number
-            <input value={member.profile.phone || ""} readOnly />
+            <input value={member?.profile?.phone || ""} readOnly />
           </label>
+
           <label className="ss-wide">
             Address
-            <input value={member.profile.address || ""} readOnly />
+            <input value={member?.profile?.address || ""} readOnly />
           </label>
 
           <label>
@@ -872,26 +1114,17 @@ function RequestModal({ ov, onClose, onSubmitted }) {
               name="amount"
               type="number"
               inputMode="decimal"
-              min="1"
-              placeholder="₹________"
+              min="0.01"
+              step="0.01"
+              max={fund?.balance ?? 0}
+              placeholder="Enter amount"
               value={form.amount}
               onChange={update}
             />
           </label>
-          <label>
-            Monthly Salary (₹)
-            <input
-              name="salary"
-              type="number"
-              inputMode="decimal"
-              min="1"
-              placeholder="₹________"
-              value={form.salary}
-              onChange={update}
-            />
-          </label>
+
           <label className="ss-wide">
-            Reason
+            Reason for Request
             <textarea
               name="reason"
               rows={4}
@@ -902,23 +1135,92 @@ function RequestModal({ ov, onClose, onSubmitted }) {
             />
           </label>
 
+          <div className="ss-assessment ss-wide">
+            <div className="ss-assessment__heading">
+              <div>
+                <h4>Available-Balance Assessment</h4>
+                <p>Saved history from the last 28 days</p>
+              </div>
+
+              <span className="ss-assessment__badge">
+                {historyLoading ? "Loading" : `${assessment.count} records`}
+              </span>
+            </div>
+
+            {historyLoading ? (
+              <p className="ss-assessment__message">
+                Loading your saved balance history...
+              </p>
+            ) : historyError ? (
+              <div className="ss-assessment__message ss-assessment__message--error">
+                {historyError}
+              </div>
+            ) : assessment.count === 0 ? (
+              <div className="ss-assessment__message">
+                No saved balance history was found for this period.
+                Historical analysis is unavailable, but the existing
+                eligibility and fund-balance checks still apply.
+              </div>
+            ) : (
+              <div className="ss-assessment__grid">
+                <div className="ss-assessment__item">
+                  <span>Average balance</span>
+                  <strong>{rupees(assessment.average)}</strong>
+                </div>
+
+                <div className="ss-assessment__item">
+                  <span>Lowest balance</span>
+                  <strong>{rupees(assessment.minimum)}</strong>
+                </div>
+
+                <div className="ss-assessment__item">
+                  <span>Highest balance</span>
+                  <strong>{rupees(assessment.maximum)}</strong>
+                </div>
+
+                <div className="ss-assessment__item">
+                  <span>Balance trend</span>
+                  <strong>{formatTrend()}</strong>
+                </div>
+              </div>
+            )}
+
+            <p className="ss-assessment__disclaimer">
+              This is application-calculated balance history, not a live
+              personal bank balance. It is supporting information only;
+              the administrator makes the final decision.
+            </p>
+          </div>
+
           <p className="ss-note ss-wide">
-            Available Sangha fund: <strong>{rupees(fund.balance)}</strong>
+            Available Sangha fund:{" "}
+            <strong>{rupees(fund?.balance ?? 0)}</strong>
           </p>
-          {member.outstanding > 0 && (
+
+          {(member?.outstanding ?? 0) > 0 && (
             <p className="ss-note ss-note--warn ss-wide">
-              You currently owe <strong>{rupees(member.outstanding)}</strong>. Your repayment
-              history may be reviewed by the Admin/Superadmin.
+              Your current outstanding amount is{" "}
+              <strong>{rupees(member.outstanding)}</strong>. Your repayment
+              history may be reviewed by the administrator.
             </p>
           )}
 
           {error && <div className="ss-alert ss-wide">{error}</div>}
 
           <div className="ss-actions ss-wide">
-            <button type="button" className="ss-btn" onClick={onClose}>
+            <button
+              type="button"
+              className="ss-btn"
+              onClick={onClose}
+            >
               Cancel
             </button>
-            <button type="button" className="ss-btn ss-btn--primary" onClick={goConfirm}>
+
+            <button
+              type="button"
+              className="ss-btn ss-btn--primary"
+              onClick={goConfirm}
+            >
               Continue
             </button>
           </div>
@@ -927,31 +1229,67 @@ function RequestModal({ ov, onClose, onSubmitted }) {
 
       {step === "confirm" && (
         <>
-          <h4 className="ss-summary-title">Please review your request</h4>
+          <h4 className="ss-summary-title">Review Your Request</h4>
+
           <dl className="ss-kv">
-            <div><dt>Requested Amount</dt><dd>{rupees(amount)}</dd></div>
-            <div><dt>Monthly Salary</dt><dd>{rupees(salary)}</dd></div>
-            <div><dt>Available Sangha Fund</dt><dd>{rupees(fund.balance)}</dd></div>
-            <div className="ss-wide"><dt>Reason</dt><dd>{form.reason.trim()}</dd></div>
+            <div>
+              <dt>Requested Amount</dt>
+              <dd>{rupees(amount)}</dd>
+            </div>
+
+            <div>
+              <dt>Available Sangha Fund</dt>
+              <dd>{rupees(fund?.balance ?? 0)}</dd>
+            </div>
+
+            <div>
+              <dt>Balance History</dt>
+              <dd>
+                {historyLoading
+                  ? "Loading..."
+                  : `${assessment.count} saved records`}
+              </dd>
+            </div>
+
+            <div className="ss-wide">
+              <dt>Reason</dt>
+              <dd>{form.reason.trim()}</dd>
+            </div>
           </dl>
-          {member.outstanding > 0 && (
-            <p className="ss-note ss-note--warn">
-              Current outstanding: {rupees(member.outstanding)}. Your repayment history may be
-              reviewed.
-            </p>
-          )}
+
+          <p className="ss-assessment__disclaimer">
+            Your request is not approved automatically. The backend checks
+            eligibility and available funds again when you submit.
+          </p>
+
           {error && <div className="ss-alert">{error}</div>}
+
           <div className="ss-actions">
-            <button type="button" className="ss-btn" onClick={() => setStep("form")} disabled={submitting}>
+            <button
+              type="button"
+              className="ss-btn"
+              onClick={() => {
+                setError("");
+                setStep("form");
+              }}
+              disabled={submitting}
+            >
               Back
             </button>
-            <button type="button" className="ss-btn ss-btn--primary" onClick={submit} disabled={submitting}>
+
+            <button
+              type="button"
+              className="ss-btn ss-btn--primary"
+              onClick={submit}
+              disabled={submitting}
+            >
               {submitting ? (
                 <>
-                  <Loader2 size={16} className="ss-spin" /> Submitting...
+                  <Loader2 size={16} className="ss-spin" />
+                  Submitting...
                 </>
               ) : (
-                "Request for Money"
+                "Submit Request"
               )}
             </button>
           </div>
@@ -962,13 +1300,36 @@ function RequestModal({ ov, onClose, onSubmitted }) {
         <div className="ss-success">
           <CheckCircle2 size={40} />
           <h4>Request Submitted Successfully</h4>
+
           <dl className="ss-kv">
-            <div><dt>Request ID</dt><dd>#{result.id}</dd></div>
-            <div><dt>Requested Amount</dt><dd>{rupees(result.amount)}</dd></div>
-            <div><dt>Status</dt><dd><Badge tone="amber">Pending Review</Badge></dd></div>
-            <div><dt>Submitted</dt><dd>{fmtDate(result.requestedAt)}</dd></div>
+            <div>
+              <dt>Request ID</dt>
+              <dd>#{result.id}</dd>
+            </div>
+
+            <div>
+              <dt>Requested Amount</dt>
+              <dd>{rupees(result.amount)}</dd>
+            </div>
+
+            <div>
+              <dt>Status</dt>
+              <dd>
+                <Badge tone="amber">Pending Review</Badge>
+              </dd>
+            </div>
+
+            <div>
+              <dt>Submitted</dt>
+              <dd>{fmtDate(result.requestedAt)}</dd>
+            </div>
           </dl>
-          <button type="button" className="ss-btn ss-btn--primary" onClick={onClose}>
+
+          <button
+            type="button"
+            className="ss-btn ss-btn--primary"
+            onClick={onClose}
+          >
             Done
           </button>
         </div>
@@ -1278,6 +1639,11 @@ export default function SanghaSavings({
   const [histLoading, setHistLoading] = useState(true);
   const [histError, setHistError] = useState("");
 
+  const [balanceHistory, setBalanceHistory] = useState([]);
+  const [balanceHistoryLoading, setBalanceHistoryLoading] = useState(true);
+  const [balanceHistoryError, setBalanceHistoryError] = useState("");
+  const [snapshotError, setSnapshotError] = useState("");
+
   const [sanghas, setSanghas] = useState([]);
   const [sanghaId, setSanghaId] = useState(null);
 
@@ -1293,6 +1659,9 @@ export default function SanghaSavings({
     setHistLoading(true);
     setOvError("");
     setHistError("");
+    setBalanceHistoryLoading(true);
+    setBalanceHistoryError("");
+    setSnapshotError("");
 
     const params = sid ? { sangha_id: sid } : undefined;
     const [o, h] = await Promise.allSettled([
@@ -1302,6 +1671,21 @@ export default function SanghaSavings({
 
     if (o.status === "fulfilled") {
       setOv(o.value.data);
+      const overview = o.value.data;
+      const balance = overview?.member?.availableBalance;
+      if (
+        overview?.role === "member"
+        && typeof balance === "number"
+        && Number.isFinite(balance)
+        && balance >= 0
+      ) {
+        try {
+          await api.post("/me/available-balance/snapshots");
+        } catch (err) {
+          console.error("Available balance snapshot failed:", err);
+          setSnapshotError(errorText(err, "Unable to record today's available balance snapshot."));
+        }
+      }
     } else {
       console.error("Overview failed:", o.reason);
       setOvError(errorText(o.reason, "Unable to load Sangha Savings information."));
@@ -1314,9 +1698,27 @@ export default function SanghaSavings({
       setHistError(errorText(h.reason, "Unable to load your request history."));
     }
 
+    const memberView = o.status === "fulfilled"
+      ? o.value.data?.role === "member"
+      : storedUser.role === "member";
+    if (memberView) {
+      try {
+        const response = await api.get("/me/available-balance/history", {
+          params: { days: 30 },
+        });
+        setBalanceHistory(response.data);
+      } catch (err) {
+        console.error("Available balance history failed:", err);
+        setBalanceHistoryError(errorText(err, "Unable to load available balance history."));
+      }
+    } else {
+      setBalanceHistory([]);
+    }
+
     setOvLoading(false);
     setHistLoading(false);
-  }, []);
+    setBalanceHistoryLoading(false);
+  }, [storedUser.role]);
 
   useEffect(() => {
     load(null);
@@ -1457,6 +1859,13 @@ export default function SanghaSavings({
 
           <MoneyJourney request={requests[0] ?? null} isStaff={false} />
           <FinancialPosition member={ov?.member} loading={ovLoading} />
+          <AvailableBalanceHistory
+            items={balanceHistory}
+            loading={balanceHistoryLoading}
+            error={balanceHistoryError}
+            snapshotError={snapshotError}
+            onRetry={reload}
+          />
           <SavingsAccountCard sangha={ov?.sangha} account={ov?.account} loading={ovLoading} />
         </>
       )}

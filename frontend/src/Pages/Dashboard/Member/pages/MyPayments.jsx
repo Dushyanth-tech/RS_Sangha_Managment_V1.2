@@ -131,9 +131,9 @@ const Card = ({ className = "", title, subtitle, children }) => (
   </section>
 );
 
-function Stat({ icon: Icon, label, value, desc, loading, tone }) {
+function Stat({ icon: Icon, label, value, desc, loading, tone, wide }) {
   return (
-    <article className="mp-stat">
+    <article className={`mp-stat ${wide ? "mp-stat--wide" : ""}`}>
       <span className={`mp-stat__icon ${tone ? `mp-stat__icon--${tone}` : ""}`}>
         <Icon size={18} />
       </span>
@@ -666,6 +666,15 @@ export default function MyPayments({ onNavigate }) {
 
       {/* ---------- Summary ---------- */}
       <div className="mp-stats">
+        <Stat
+          icon={Landmark}
+          label="Your Bank Balance"
+          value={rupees(member ? member.bankBalance : null)}
+          desc="Money in your account"
+          tone="green"
+          wide
+          loading={loading}
+        />
         <Stat
           icon={PiggyBank}
           label="Contribution Due"

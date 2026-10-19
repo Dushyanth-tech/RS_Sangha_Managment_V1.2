@@ -148,6 +148,35 @@
   color: var(--muted);
 }
 
+/* RS-Sangha score: slim progress bar + retry link, inside the existing card */
+.hp-score__bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.hp-score__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary-700);
+  transition: width 0.4s ease;
+}
+
+.hp-score__retry {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary-700);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* ---------- My Sangha section ---------- */
 .hp-sangha {
   padding: 22px;

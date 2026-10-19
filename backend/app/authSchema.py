@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from pydantic import BaseModel, EmailStr, field_validator, Field
 from decimal import Decimal
@@ -245,3 +245,60 @@ class FundPaymentReject(BaseModel):
 class ContributionCreate(BaseModel):
     dates: list[date] = Field(..., min_length=1, max_length=31)
     reference: str = Field(..., min_length=6, max_length=60)
+
+
+class MemberBankBalanceSnapshotResponse(BaseModel):
+    id: int
+    balance: Decimal
+    recorded_at: datetime
+    source: str
+
+    model_config = {"from_attributes": True}
+
+
+class MemberBankBalanceSnapshotCreateResponse(BaseModel):
+    snapshot: MemberBankBalanceSnapshotResponse
+    created: bool
+
+
+class MemberAvailableBalanceSnapshotResponse(BaseModel):
+    id: int
+    balance: Decimal
+    recorded_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MemberAvailableBalanceSnapshotCreateResponse(BaseModel):
+    snapshot: MemberAvailableBalanceSnapshotResponse
+    created: bool
+
+
+class EmploymentProfileUpdate(BaseModel):
+    employment_type: Literal["house_wife", "other"]
+    professional: str | None = None
+    salary: Decimal | None = Field(
+        default=None,
+        ge=0,
+        max_digits=12,
+        decimal_places=2,
+    )
+
+
+class CreditScoreFactor(BaseModel):
+    key: str
+    label: str
+    weight: int          # percent of the total score
+    score: float         # 0-100
+
+
+class CreditScoreResponse(BaseModel):
+    """RS-Sangha INTERNAL score. Not an official CIBIL score."""
+    score: int | None
+    min_score: int
+    max_score: int
+    category: str | None
+    status: Literal["sufficient", "insufficient_data"]
+    missing: list[str] = []
+    calculated_at: datetime
+    factors: list[CreditScoreFactor] = []

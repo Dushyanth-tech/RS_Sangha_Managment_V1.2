@@ -82,9 +82,90 @@ class User(Base):
         # Entered by admin/superadmin from a real report. Never calculated here.
     cibil_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cibil_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    
+    professional: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    salary: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2),
+        nullable=True,
+    )
+
+    # Money held in the member's app account (stored in this DB, not a live bank link).
+    bank_balance: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
     sangha: Mapped["Sanghas"] = relationship(
         back_populates="members", foreign_keys=[sangha_id]
     )
+    bank_balance_snapshots: Mapped[list["MemberBankBalanceSnapshot"]] = relationship(
+        back_populates="member"
+    )
+    available_balance_snapshots: Mapped[list["MemberAvailableBalanceSnapshot"]] = relationship(
+        back_populates="member"
+    )
+
+
+class MemberBankBalanceSnapshot(Base):
+    __tablename__ = "member_bank_balance_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(80), nullable=False)
+    source_reference: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    member: Mapped["User"] = relationship(back_populates="bank_balance_snapshots")
+
+    __table_args__ = (
+        Index(
+            "ix_member_bank_balance_snapshots_member_recorded_at",
+            "member_id",
+            "recorded_at",
+        ),
+        UniqueConstraint(
+            "member_id",
+            "source",
+            "source_reference",
+            name="uq_member_bank_snapshot_source_reference",
+        ),
+    )
+
+
+class MemberAvailableBalanceSnapshot(Base):
+    __tablename__ = "member_available_balance_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    snapshot_day: Mapped[date] = mapped_column(Date, nullable=False)
+
+    member: Mapped["User"] = relationship(back_populates="available_balance_snapshots")
+
+    __table_args__ = (
+        Index(
+            "ix_member_available_balance_snapshots_member_recorded_at",
+            "member_id",
+            "recorded_at",
+        ),
+        UniqueConstraint(
+            "member_id",
+            "snapshot_day",
+            name="uq_member_available_balance_snapshot_day",
+        ),
+    )
+
 
 class Sanghas(Base):
     __tablename__ = "sanghas"

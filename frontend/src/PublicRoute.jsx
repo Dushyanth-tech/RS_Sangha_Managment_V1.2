@@ -22,7 +22,7 @@ export default function PublicRoute({ children }) {
         return <Navigate to="/dashboard/admin" replace />;
 
       case "subadmin":
-        return <Navigate to="/dashboard/subadmin" replace />;
+        return <Navigate to="/dashboard/member" replace />;   // FIX: /dashboard/subadmin does not exist (caused a redirect loop)
 
       case "member":
         return <Navigate to="/dashboard/member" replace />;

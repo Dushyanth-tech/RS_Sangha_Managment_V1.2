@@ -12,6 +12,7 @@ import {
 
 import api from "../../../../api/axiosInstance";
 import MembersModal from "../Modal/MembersModal";
+import MemberBankBalanceHistory from "./MemberBankBalanceHistory";
 import "./HomePage.css";
 
 const MAX_MEMBERS = 20;
@@ -26,14 +27,6 @@ const greeting = () => {
 
 const rupees = (value) => `₹${Number(value || 0).toLocaleString("en-IN")}`;
 
-// Labels a real score. It never creates one.
-const cibilLabel = (score) => {
-  if (score >= 750) return "Excellent";
-  if (score >= 700) return "Good";
-  if (score >= 650) return "Fair";
-  return "Needs Improvement";
-};
-
 export default function HomePage({ user = {}, onNavigate }) {
   const [sangha, setSangha] = useState(null);
   const [members, setMembers] = useState([]);
@@ -43,6 +36,21 @@ export default function HomePage({ user = {}, onNavigate }) {
   const [error, setError] = useState("");
 
   const [showMembers, setShowMembers] = useState(false);
+
+  // RS-Sangha internal score: { state: "loading" | "ready" | "error", data }
+  const [score, setScore] = useState({ state: "loading", data: null });
+
+  const loadScore = useCallback(async () => {
+    setScore({ state: "loading", data: null });
+    try {
+      // No member id is sent: the backend uses the logged-in member from the JWT.
+      const response = await api.get("/me/credit-score");
+      setScore({ state: "ready", data: response.data });
+    } catch (err) {
+      console.error("RS-Sangha score failed:", err);
+      setScore({ state: "error", data: null });
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,6 +87,10 @@ export default function HomePage({ user = {}, onNavigate }) {
     load();
   }, [load]);
 
+  useEffect(() => {
+    loadScore();
+  }, [loadScore]);
+
   const firstName = (user.fullname || "Member").split(" ")[0];
 
   const hasSangha = !!sangha;
@@ -88,7 +100,6 @@ export default function HomePage({ user = {}, onNavigate }) {
     [sangha?.city, sangha?.state].filter(Boolean).join(", ") || "N/A";
 
   const savings = summary?.savings ?? null;
-  const cibil = summary?.cibilScore ?? null;
   const debt = Number(summary?.outstandingDebt ?? 0);
 
   const previewMembers = members.slice(0, HOME_MEMBER_PREVIEW);
@@ -143,25 +154,64 @@ export default function HomePage({ user = {}, onNavigate }) {
           </div>
         </article>
 
-        {/* CIBIL */}
+        {/* RS-Sangha internal score (same card, same position) */}
         <article className="hp-card">
           <div className="hp-card__head">
             <span className="hp-card__icon">
               <Gauge size={18} />
             </span>
-            <span className="hp-card__label">CIBIL Score</span>
+            <span
+              className="hp-card__label"
+              title="RS-Sangha internal score. This is not an official CIBIL score."
+            >
+              RS-Sangha Score
+            </span>
           </div>
-          {loading ? (
-            <div className="hp-card__value">…</div>
-          ) : cibil ? (
+          {score.state === "loading" ? (
+            <div className="hp-card__value hp-card__value--muted">Calculating...</div>
+          ) : score.state === "error" ? (
             <>
-              <div className="hp-card__value">{cibil}</div>
-              <div className="hp-card__sub">{cibilLabel(cibil)}</div>
+              <div className="hp-card__value hp-card__value--muted">Unable to load</div>
+              <button type="button" className="hp-score__retry" onClick={loadScore}>
+                Retry
+              </button>
+            </>
+          ) : score.data?.status === "sufficient" && score.data.score != null ? (
+            <>
+              <div className="hp-card__value">
+                {score.data.score} / {score.data.max_score}
+              </div>
+              <div className="hp-card__sub">{score.data.category}</div>
+              <div
+                className="hp-score__bar"
+                role="progressbar"
+                aria-label="RS-Sangha score"
+                aria-valuemin={score.data.min_score}
+                aria-valuemax={score.data.max_score}
+                aria-valuenow={score.data.score}
+              >
+                <span
+                  style={{
+                    width: `${Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        ((score.data.score - score.data.min_score) /
+                          (score.data.max_score - score.data.min_score)) *
+                          100
+                      )
+                    )}%`,
+                  }}
+                />
+              </div>
             </>
           ) : (
-            <div className="hp-card__value hp-card__value--muted">
-              Not Available
-            </div>
+            <>
+              <div className="hp-card__value hp-card__value--muted">Insufficient Data</div>
+              {score.data?.missing?.[0] && (
+                <div className="hp-card__sub">{score.data.missing[0]}</div>
+              )}
+            </>
           )}
         </article>
 
@@ -211,6 +261,8 @@ export default function HomePage({ user = {}, onNavigate }) {
           )}
         </article>
       </section>
+
+      <MemberBankBalanceHistory />
 
       {/* ================= SECTION 3: MY SANGHA ================= */}
       <section className="hp-sangha">
